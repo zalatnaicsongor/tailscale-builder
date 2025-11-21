@@ -56,11 +56,17 @@ jobs:
           ref: ${{ env.TS_TAG }}
           path: tailscale
 
-      - name: Set up Go (match Tailscale's go.mod)
+      - name: Set up Go
         if: env.SHOULD_BUILD == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: 'tailscale/go.mod'
+          cache-dependency-path: 'tailscale/go.sum'
+          architecture: 'x64'
+
+      - name: Install dependencies
+        run: |
+          go get .
 
       - name: Build combined multicall tailscale via build_dist.sh
         if: env.SHOULD_BUILD == 'true'
