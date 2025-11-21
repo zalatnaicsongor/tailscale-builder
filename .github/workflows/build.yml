@@ -1,21 +1,31 @@
-name: Build Tailscale combined static-ish binary (amd64, latest release)
+name: Tailscale openwrt x64 latest build
 
 on:
   workflow_dispatch: {}
   schedule:
     - cron: "0 3 * * *"
 
+permissions:
+  contents: write  # needed to push commits, tags & create releases
+
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
 
     steps:
-      # Get latest release tag (stable, not prerelease)
-      - name: Determine latest Tailscale release tag
-        run: |
-          API_URL="https://api.github.com/repos/tailscale/tailscale/releases/latest"
-          TAG=$(curl -sSL "$API_URL" | jq -r '.tag_name')
+      - name: Checkout this repo (main)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0   # we want full history for tagging
 
+      - name: Determine latest Tailscale release
+        id: ts-release
+        run: |
+          set -euo pipefail
+          API_URL="https://api.github.com/repos/tailscale/tailscale/releases/latest"
+
+          TAG=$(curl -sSL "$API_URL" | jq -r '.tag_name')
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
             echo "Failed to determine latest Tailscale release tag"
             exit 1
@@ -24,56 +34,112 @@ jobs:
           echo "Latest Tailscale tag: $TAG"
           echo "TS_TAG=$TAG" >> "$GITHUB_ENV"
 
-      # Checkout tailscale/tailscale into the *current working dir*
-      # (no 'path' set => uses $GITHUB_WORKSPACE directly)
+      - name: Check if this tag already exists here
+        id: check-tag
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TS_TAG" >/dev/null; then
+            echo "Tag $TS_TAG already exists in this repo; nothing to do."
+            echo "SHOULD_BUILD=false" >> "$GITHUB_ENV"
+          else
+            echo "Tag $TS_TAG does not exist yet; will build and release."
+            echo "SHOULD_BUILD=true" >> "$GITHUB_ENV"
+          fi
+
+      # --- Only run the following steps if we actually need a new version ---
+
       - name: Checkout tailscale/tailscale at that tag
-        uses: actions/checkout@v6
+        if: env.SHOULD_BUILD == 'true'
+        uses: actions/checkout@v4
         with:
           repository: tailscale/tailscale
           ref: ${{ env.TS_TAG }}
+          path: tailscale
 
-      - name: Record build info
-        run: |
-          {
-            echo "Tailscale tag: $TS_TAG"
-            echo -n "Commit: "
-            git rev-parse HEAD
-          } > build-info.txt
-
-      - name: Set up Go
+      - name: Set up Go (match Tailscale's go.mod)
+        if: env.SHOULD_BUILD == 'true'
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'go.mod'
-          cache-dependency-path: 'go.sum'
-          architecture: 'x64'
+          go-version-file: 'tailscale/go.mod'
 
       - name: Build combined multicall tailscale via build_dist.sh
+        if: env.SHOULD_BUILD == 'true'
+        working-directory: tailscale
         env:
           GOOS: linux
           GOARCH: amd64
           CGO_ENABLED: 0
         run: |
+          set -euo pipefail
           chmod +x ./build_dist.sh
 
-          # Smaller embedded-style binary + CLI included in tailscaled
+          # Combined daemon+CLI, extra-small, CGO-free
           ./build_dist.sh --extra-small \
             -o tailscale.combined \
             -tags ts_include_cli \
             ./cmd/tailscaled
 
-          echo "Built binary:"
           ls -lh tailscale.combined || true
 
           echo
           echo "ldd output (may fail or say 'not a dynamic executable' for static binaries):"
-          ldd tailscale.combined || echo "ldd failed (likely due to static binary)"
+          ldd tailscale.combined || echo "ldd failed (likely static binary)"
 
-          tar czf tailscale-linux-amd64-combined.tar.gz tailscale.combined
+          TARBALL="tailscale-${TS_TAG}-linux-amd64-combined.tar.gz"
+          tar czf "../$TARBALL" tailscale.combined
+          echo "TARBALL=$TARBALL" >> "$GITHUB_ENV"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Update README.md with latest Tailscale version and commit to main
+        if: env.SHOULD_BUILD == 'true'
+        run: |
+          set -euo pipefail
+
+          # Make sure README exists
+          if [ ! -f README.md ]; then
+            echo "# Tailscale binaries openwrt x64 --extra-small" > README.md
+            echo >> README.md
+          fi
+
+          # Update or append the version line
+          if grep -q '^Latest Tailscale version:' README.md; then
+            sed -i "s/^Latest Tailscale version:.*/Latest Tailscale version: \`${TS_TAG}\`/" README.md
+          else
+            printf "\nLatest Tailscale version: \`%s\`\n" "$TS_TAG" >> README.md
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add README.md
+
+          # Only commit if there is a change
+          if git diff --cached --quiet; then
+            echo "No changes in README.md (already at $TS_TAG); skipping commit."
+          else
+            git commit -m "Update README for Tailscale $TS_TAG"
+            git push origin main
+          fi
+
+      - name: Create git tag in this repo pointing at current main
+        if: env.SHOULD_BUILD == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -a "$TS_TAG" -m "Tailscale $TS_TAG"
+          git push origin "$TS_TAG"
+
+      - name: Create GitHub release with binary attached
+        if: env.SHOULD_BUILD == 'true'
+        uses: softprops/action-gh-release@v1
         with:
-          name: tailscale-linux-amd64-combined
-          path: |
-            tailscale-linux-amd64-combined.tar.gz
-            build-info.txt
+          tag_name: ${{ env.TS_TAG }}
+          name: Tailscale ${{ env.TS_TAG }}
+          body: |
+            Automated build of Tailscale ${{ env.TS_TAG }} for linux/amd64 openwrt.
+
+            - Source: tailscale/tailscale @ ${{ env.TS_TAG }}
+            - Built with: ./build_dist.sh --extra-small -tags ts_include_cli ./cmd/tailscaled
+            - Binary: combined "tailscale"/"tailscaled" multicall, CGO_ENABLED=0
+          files: ${{ env.TARBALL }}
