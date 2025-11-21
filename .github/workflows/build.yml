@@ -1,0 +1,70 @@
+name: Build Tailscale combined static-ish binary (amd64, latest release)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 3 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone Tailscale at latest GitHub release
+        run: |
+          API_URL="https://api.github.com/repos/tailscale/tailscale/releases/latest"
+
+          TAG=$(curl -sSL "$API_URL" | jq -r '.tag_name')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "Failed to determine latest Tailscale release tag from GitHub API"
+            exit 1
+          fi
+
+          echo "Using Tailscale tag: $TAG"
+
+          git clone --depth=1 --branch "$TAG" https://github.com/tailscale/tailscale.git
+
+          cd tailscale
+          {
+            echo "Tailscale tag: $TAG"
+            echo -n "Commit: "
+            git rev-parse HEAD
+          } >> ../build-info.txt
+
+      - name: Set up Go (match Tailscale toolchain)
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'tailscale/go.mod'
+
+      - name: Build combined multicall tailscale via build_dist.sh
+        working-directory: tailscale
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          CGO_ENABLED: 0
+        run: |
+          chmod +x ./build_dist.sh
+
+          # Smaller embedded-style binary + CLI included in tailscaled
+          ./build_dist.sh --extra-small \
+            -o tailscale.combined \
+            -tags ts_include_cli \
+            ./cmd/tailscaled
+
+          ls -lh tailscale.combined || true
+          echo
+          echo "ldd output (static binaries may print 'not a dynamic executable'):"
+          ldd tailscale.combined || echo "ldd failed (expected for fully static)"
+
+          tar czf ../tailscale-linux-amd64-combined.tar.gz tailscale.combined
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-linux-amd64-combined
+          path: |
+            tailscale-linux-amd64-combined.tar.gz
+            build-info.txt
