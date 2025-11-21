@@ -10,37 +10,42 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
-
-      - name: Clone Tailscale at latest GitHub release
+      # Get latest release tag (stable, not prerelease)
+      - name: Determine latest Tailscale release tag
         run: |
           API_URL="https://api.github.com/repos/tailscale/tailscale/releases/latest"
-
           TAG=$(curl -sSL "$API_URL" | jq -r '.tag_name')
+
           if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
-            echo "Failed to determine latest Tailscale release tag from GitHub API"
+            echo "Failed to determine latest Tailscale release tag"
             exit 1
           fi
 
-          echo "Using Tailscale tag: $TAG"
+          echo "Latest Tailscale tag: $TAG"
+          echo "TS_TAG=$TAG" >> "$GITHUB_ENV"
 
-          git clone --depth=1 --branch "$TAG" https://github.com/tailscale/tailscale.git
+      # Checkout tailscale/tailscale into the *current working dir*
+      # (no 'path' set => uses $GITHUB_WORKSPACE directly)
+      - name: Checkout tailscale/tailscale at that tag
+        uses: actions/checkout@v6
+        with:
+          repository: tailscale/tailscale
+          ref: ${{ env.TS_TAG }}
 
-          cd tailscale
+      - name: Record build info
+        run: |
           {
-            echo "Tailscale tag: $TAG"
+            echo "Tailscale tag: $TS_TAG"
             echo -n "Commit: "
             git rev-parse HEAD
-          } >> ../build-info.txt
+          } > build-info.txt
 
-      - name: Set up Go (match Tailscale toolchain)
+      - name: Set up Go (match Tailscale's go.mod)
         uses: actions/setup-go@v6
         with:
-          go-version-file: 'tailscale/go.mod'
+          go-version-file: 'go.mod'
 
       - name: Build combined multicall tailscale via build_dist.sh
-        working-directory: tailscale
         env:
           GOOS: linux
           GOARCH: amd64
@@ -54,12 +59,14 @@ jobs:
             -tags ts_include_cli \
             ./cmd/tailscaled
 
+          echo "Built binary:"
           ls -lh tailscale.combined || true
-          echo
-          echo "ldd output (static binaries may print 'not a dynamic executable'):"
-          ldd tailscale.combined || echo "ldd failed (expected for fully static)"
 
-          tar czf ../tailscale-linux-amd64-combined.tar.gz tailscale.combined
+          echo
+          echo "ldd output (may fail or say 'not a dynamic executable' for static binaries):"
+          ldd tailscale.combined || echo "ldd failed (likely due to static binary)"
+
+          tar czf tailscale-linux-amd64-combined.tar.gz tailscale.combined
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
