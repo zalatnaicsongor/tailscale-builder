@@ -66,6 +66,7 @@ jobs:
 
       - name: Install dependencies
         if: env.SHOULD_BUILD == 'true'
+        working-directory: './tailscale'
         run: |
           go get .
 
