@@ -1,3 +1,3 @@
 # Tailscale binaries openwrt x64 --extra-small
 
-Latest Tailscale version: `v1.98.5`
+Latest Tailscale version: `v1.98.8`
